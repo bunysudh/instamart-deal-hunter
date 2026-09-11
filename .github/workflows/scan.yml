@@ -1,10 +1,10 @@
-name: Supabase PostgreSQL Login Test
+name: Supabase Transaction Pooler Test
 
 on:
   workflow_dispatch:
 
 jobs:
-  test-postgres-login:
+  test-transaction-pooler:
     runs-on: ubuntu-latest
 
     permissions:
@@ -16,30 +16,29 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y postgresql-client
 
-      - name: Test PostgreSQL login
-        env:
-          PGPASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+      - name: Test Transaction Pooler
         run: |
           echo "========================================"
-          echo "SUPABASE POSTGRESQL LOGIN TEST"
+          echo "SUPABASE TRANSACTION POOLER TEST"
           echo "========================================"
 
           echo ""
-          echo "Testing database connection..."
+          echo "=== DNS ==="
 
-          psql \
-            "host=aws-0-ap-northeast-2.pooler.supabase.com \
-             port=5432 \
-             dbname=postgres \
-             user=postgres.sauxptutvwaxwicqdfsxc \
-             sslmode=require \
-             connect_timeout=15" \
-            -c "SELECT 1 AS connection_test;"
+          nslookup aws-0-ap-northeast-2.pooler.supabase.com
+
+          echo ""
+          echo "=== PostgreSQL 6543 ==="
+
+          pg_isready \
+            -h aws-0-ap-northeast-2.pooler.supabase.com \
+            -p 6543 \
+            -t 15
 
           RESULT=$?
 
           echo ""
-          echo "psql exit code: $RESULT"
+          echo "pg_isready exit code: $RESULT"
 
           echo ""
           echo "========================================"
