@@ -1,21 +1,4 @@
-      - name: Test Supabase DNS
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-        run: |
-          python - <<'PY'
-          import os
-          import socket
-          from urllib.parse import urlparse
-
-          url = os.environ["SUPABASE_URL"]
-          host = urlparse(url).hostname
-
-          print("Supabase host:", host)
-          print("DNS:", socket.gethostbyname(host))
-          PY
-          
 name: Instamart Deal Scanner
-
 on:
   workflow_dispatch:
   schedule:
