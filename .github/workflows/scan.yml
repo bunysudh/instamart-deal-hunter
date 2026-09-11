@@ -1,36 +1,65 @@
-name: Supabase Pooler Test
+name: Supabase Database Login Test
 
 on:
   workflow_dispatch:
 
 jobs:
-  test-pooler:
+  test-database:
     runs-on: ubuntu-latest
 
     permissions:
       contents: read
 
     steps:
-      - name: Test Supabase Session Pooler
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install PostgreSQL driver
         run: |
-          echo "========================================"
-          echo "SUPABASE SESSION POOLER TEST"
-          echo "========================================"
+          python -m pip install --upgrade pip
+          pip install psycopg[binary]
 
-          echo ""
-          echo "=== DNS ==="
+      - name: Test PostgreSQL login
+        env:
+          DB_HOST: aws-0-ap-northeast-2.pooler.supabase.com
+          DB_PORT: "5432"
+          DB_NAME: postgres
+          DB_USER: postgres.sauxptutvwaxwicqdfsxc
+          DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+        run: |
+          python - <<'PY'
+          import os
+          import psycopg
 
-          nslookup aws-0-ap-northeast-2.pooler.supabase.com
+          print("========================================")
+          print("SUPABASE POSTGRESQL LOGIN TEST")
+          print("========================================")
 
-          echo ""
-          echo "=== TCP 5432 ==="
+          print("Host:", os.environ["DB_HOST"])
+          print("Port:", os.environ["DB_PORT"])
+          print("Database:", os.environ["DB_NAME"])
+          print("User:", os.environ["DB_USER"])
 
-          curl -v \
-            telnet://aws-0-ap-northeast-2.pooler.supabase.com:5432 \
-            --connect-timeout 15 \
-            --max-time 30
+          conn = psycopg.connect(
+              host=os.environ["DB_HOST"],
+              port=int(os.environ["DB_PORT"]),
+              dbname=os.environ["DB_NAME"],
+              user=os.environ["DB_USER"],
+              password=os.environ["DB_PASSWORD"],
+              sslmode="require",
+              connect_timeout=15,
+          )
 
-          echo ""
-          echo "========================================"
-          echo "POOLER TEST COMPLETE"
-          echo "========================================"
+          with conn.cursor() as cur:
+              cur.execute("select 1;")
+              result = cur.fetchone()
+
+          conn.close()
+
+          print("")
+          print("DATABASE LOGIN: SUCCESS")
+          print("SELECT 1 RESULT:", result)
+          print("========================================")
+          PY
