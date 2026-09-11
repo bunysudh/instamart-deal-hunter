@@ -1,46 +1,32 @@
-name: Supabase Transaction Pooler Login Test
+name: Cloud Scanner Database Test
 
 on:
   workflow_dispatch:
 
 jobs:
-  test-login:
+  database-test:
     runs-on: ubuntu-latest
 
     permissions:
       contents: read
 
     steps:
-      - name: Install PostgreSQL client
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y postgresql-client
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - name: Test PostgreSQL login
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install psycopg[binary]
+
+      - name: Run cloud scanner database test
         env:
-          PGPASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
-          PGUSER: ${{ secrets.SUPABASE_DB_USER }}
-          PGHOST: aws-0-ap-northeast-2.pooler.supabase.com
-          PGPORT: "6543"
-          PGDATABASE: postgres
-          PGSSLMODE: require
+          SUPABASE_DB_USER: ${{ secrets.SUPABASE_DB_USER }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
         run: |
-          echo "========================================"
-          echo "SUPABASE TRANSACTION POOLER LOGIN TEST"
-          echo "========================================"
-
-          echo "Host: $PGHOST"
-          echo "Port: $PGPORT"
-          echo "Database: $PGDATABASE"
-          echo "User: [hidden]"
-
-          psql \
-            -c "SELECT 1 AS connection_test;"
-
-          RESULT=$?
-
-          echo ""
-          echo "psql exit code: $RESULT"
-          echo "========================================"
-
-          exit $RESULT
+          python cloud_scanner.py
