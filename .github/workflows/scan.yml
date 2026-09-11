@@ -19,18 +19,22 @@ jobs:
       - name: Test PostgreSQL login
         env:
           PGPASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+          PGUSER: ${{ secrets.SUPABASE_DB_USER }}
+          PGHOST: aws-0-ap-northeast-2.pooler.supabase.com
+          PGPORT: "6543"
+          PGDATABASE: postgres
+          PGSSLMODE: require
         run: |
           echo "========================================"
           echo "SUPABASE TRANSACTION POOLER LOGIN TEST"
           echo "========================================"
 
+          echo "Host: $PGHOST"
+          echo "Port: $PGPORT"
+          echo "Database: $PGDATABASE"
+          echo "User: [hidden]"
+
           psql \
-            "host=aws-0-ap-northeast-2.pooler.supabase.com \
-             port=6543 \
-             dbname=postgres \
-             user=postgres.sauxptutvwaxwicqdfsxc \
-             sslmode=require \
-             connect_timeout=15" \
             -c "SELECT 1 AS connection_test;"
 
           RESULT=$?
