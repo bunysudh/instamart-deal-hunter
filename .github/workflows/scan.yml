@@ -1,65 +1,49 @@
-name: Supabase Database Login Test
+name: Supabase PostgreSQL Readiness Test
 
 on:
   workflow_dispatch:
 
 jobs:
-  test-database:
+  test-postgres:
     runs-on: ubuntu-latest
 
     permissions:
       contents: read
 
     steps:
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install PostgreSQL driver
+      - name: Install PostgreSQL client
         run: |
-          python -m pip install --upgrade pip
-          pip install psycopg[binary]
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
 
-      - name: Test PostgreSQL login
-        env:
-          DB_HOST: aws-0-ap-northeast-2.pooler.supabase.com
-          DB_PORT: "5432"
-          DB_NAME: postgres
-          DB_USER: postgres.sauxptutvwaxwicqdfsxc
-          DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+      - name: Test PostgreSQL readiness
         run: |
-          python - <<'PY'
-          import os
-          import psycopg
+          echo "========================================"
+          echo "SUPABASE POSTGRESQL READINESS TEST"
+          echo "========================================"
 
-          print("========================================")
-          print("SUPABASE POSTGRESQL LOGIN TEST")
-          print("========================================")
+          echo ""
+          echo "Host:"
+          echo "aws-0-ap-northeast-2.pooler.supabase.com"
 
-          print("Host:", os.environ["DB_HOST"])
-          print("Port:", os.environ["DB_PORT"])
-          print("Database:", os.environ["DB_NAME"])
-          print("User:", os.environ["DB_USER"])
+          echo ""
+          echo "Port:"
+          echo "5432"
 
-          conn = psycopg.connect(
-              host=os.environ["DB_HOST"],
-              port=int(os.environ["DB_PORT"]),
-              dbname=os.environ["DB_NAME"],
-              user=os.environ["DB_USER"],
-              password=os.environ["DB_PASSWORD"],
-              sslmode="require",
-              connect_timeout=15,
-          )
+          echo ""
+          echo "=== PG_ISREADY ==="
 
-          with conn.cursor() as cur:
-              cur.execute("select 1;")
-              result = cur.fetchone()
+          pg_isready \
+            -h aws-0-ap-northeast-2.pooler.supabase.com \
+            -p 5432 \
+            -t 15
 
-          conn.close()
+          RESULT=$?
 
-          print("")
-          print("DATABASE LOGIN: SUCCESS")
-          print("SELECT 1 RESULT:", result)
-          print("========================================")
-          PY
+          echo ""
+          echo "pg_isready exit code: $RESULT"
+
+          echo ""
+          echo "========================================"
+
+          exit $RESULT
