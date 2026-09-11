@@ -1,122 +1,36 @@
-name: Instamart Deal Scanner
+name: Supabase Pooler Test
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "0 * * * *"
 
 jobs:
-  scan:
+  test-pooler:
     runs-on: ubuntu-latest
 
     permissions:
       contents: read
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install httpx2
-
-      - name: Test Supabase network
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      - name: Test Supabase Session Pooler
         run: |
           echo "========================================"
-          echo "SUPABASE NETWORK DIAGNOSTIC"
+          echo "SUPABASE SESSION POOLER TEST"
           echo "========================================"
-
-          echo ""
-          echo "=== ENVIRONMENT ==="
-          env | grep -i proxy || true
 
           echo ""
           echo "=== DNS ==="
 
-          python - <<'PY'
-          import os
-          import socket
-          from urllib.parse import urlparse
-
-          url = os.environ["SUPABASE_URL"]
-          host = urlparse(url).hostname
-
-          print("Host:", host)
-
-          try:
-              ip = socket.gethostbyname(host)
-              print("gethostbyname:", ip)
-          except Exception as e:
-              print("gethostbyname FAILED:", repr(e))
-
-          try:
-              print("getaddrinfo:")
-
-              results = socket.getaddrinfo(
-                  host,
-                  443,
-                  type=socket.SOCK_STREAM
-              )
-
-              for result in results:
-                  print(result)
-
-          except Exception as e:
-              print(
-                  "getaddrinfo FAILED:",
-                  repr(e)
-              )
-          PY
+          nslookup aws-0-ap-northeast-2.pooler.supabase.com
 
           echo ""
-          echo "=== CURL IPv4 ==="
+          echo "=== TCP 5432 ==="
 
-          curl -4 -v \
+          curl -v \
+            telnet://aws-0-ap-northeast-2.pooler.supabase.com:5432 \
             --connect-timeout 15 \
-            --max-time 30 \
-            "${SUPABASE_URL}/rest/v1/" \
-            -o /tmp/supabase_response.txt \
-            2>&1 || true
-
-          echo ""
-          echo "=== CURL RESPONSE ==="
-
-          if [ -f /tmp/supabase_response.txt ]; then
-            cat /tmp/supabase_response.txt
-          else
-            echo "No response file."
-          fi
+            --max-time 30
 
           echo ""
           echo "========================================"
-          echo "END SUPABASE NETWORK DIAGNOSTIC"
+          echo "POOLER TEST COMPLETE"
           echo "========================================"
-
-      - name: Run Instamart scanner
-        env:
-          SWIGGY_TOKEN: ${{ secrets.SWIGGY_TOKEN }}
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-        run: |
-          python cloud_scanner.py
-
-      - name: Show deal results
-        if: always()
-        run: |
-          echo "========================================"
-          echo "RARE DEAL RESULTS"
-          echo "========================================"
-
-          if [ -f rare_deals.json ]; then
-            cat rare_deals.json
-          else
-            echo "No rare_deals.json was produced."
-          fi
