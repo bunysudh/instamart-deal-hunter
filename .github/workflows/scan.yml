@@ -1,10 +1,13 @@
-name: Cloud Scanner Database Test
+name: Instamart Deal Scanner
 
 on:
   workflow_dispatch:
 
+  schedule:
+    - cron: "0 * * * *"
+
 jobs:
-  database-test:
+  scan:
     runs-on: ubuntu-latest
 
     permissions:
@@ -22,11 +25,25 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install psycopg[binary]
+          pip install httpx2 psycopg[binary]
 
-      - name: Run cloud scanner database test
+      - name: Run Instamart scanner
         env:
+          SWIGGY_TOKEN: ${{ secrets.SWIGGY_TOKEN }}
           SUPABASE_DB_USER: ${{ secrets.SUPABASE_DB_USER }}
           SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
         run: |
           python cloud_scanner.py
+
+      - name: Show rare deals
+        if: always()
+        run: |
+          echo "========================================"
+          echo "RARE DEAL RESULTS"
+          echo "========================================"
+
+          if [ -f rare_deals.json ]; then
+            cat rare_deals.json
+          else
+            echo "No rare_deals.json produced."
+          fi
