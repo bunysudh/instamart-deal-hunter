@@ -1,10 +1,10 @@
-name: Supabase PostgreSQL Readiness Test
+name: Supabase PostgreSQL Login Test
 
 on:
   workflow_dispatch:
 
 jobs:
-  test-postgres:
+  test-postgres-login:
     runs-on: ubuntu-latest
 
     permissions:
@@ -16,32 +16,30 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y postgresql-client
 
-      - name: Test PostgreSQL readiness
+      - name: Test PostgreSQL login
+        env:
+          PGPASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
         run: |
           echo "========================================"
-          echo "SUPABASE POSTGRESQL READINESS TEST"
+          echo "SUPABASE POSTGRESQL LOGIN TEST"
           echo "========================================"
 
           echo ""
-          echo "Host:"
-          echo "aws-0-ap-northeast-2.pooler.supabase.com"
+          echo "Testing database connection..."
 
-          echo ""
-          echo "Port:"
-          echo "5432"
-
-          echo ""
-          echo "=== PG_ISREADY ==="
-
-          pg_isready \
-            -h aws-0-ap-northeast-2.pooler.supabase.com \
-            -p 5432 \
-            -t 15
+          psql \
+            "host=aws-0-ap-northeast-2.pooler.supabase.com \
+             port=5432 \
+             dbname=postgres \
+             user=postgres.sauxptutvwaxwicqdfsxc \
+             sslmode=require \
+             connect_timeout=15" \
+            -c "SELECT 1 AS connection_test;"
 
           RESULT=$?
 
           echo ""
-          echo "pg_isready exit code: $RESULT"
+          echo "psql exit code: $RESULT"
 
           echo ""
           echo "========================================"
