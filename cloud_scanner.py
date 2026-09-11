@@ -2,9 +2,9 @@ import os
 import json
 import time
 import importlib.util
+import urllib.request
+import urllib.error
 from datetime import datetime, timezone, timedelta
-
-import httpx2
 
 
 # ============================================================
@@ -35,7 +35,7 @@ SB_HEADERS = {
 
 spec = importlib.util.spec_from_file_location(
     "local_scanner",
-    SCANNER_FILE
+    SCANNER_FILE,
 )
 
 sw = importlib.util.module_from_spec(spec)
@@ -46,57 +46,133 @@ sw.TOKEN = SWIGGY_TOKEN
 
 
 # ============================================================
-# SUPABASE HELPERS
+# SUPABASE HTTP HELPERS
 # ============================================================
 
+def supabase_post(url, payload):
+    """
+    Send a JSON POST to Supabase using Python's built-in
+    urllib instead of httpx2.
+
+    This is intentional:
+    - Swiggy continues using the tested httpx2 scanner.
+    - Supabase uses urllib so we bypass the connection problem
+      we observed with httpx2 on the GitHub runner.
+    """
+
+    data = json.dumps(payload).encode("utf-8")
+
+    request = urllib.request.Request(
+        url,
+        data=data,
+        method="POST",
+        headers=SB_HEADERS,
+    )
+
+    last_error = None
+
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(
+                request,
+                timeout=120,
+            ) as response:
+
+                body = response.read().decode(
+                    "utf-8",
+                    errors="replace",
+                )
+
+                return response.status, body
+
+        except urllib.error.HTTPError as e:
+            body = e.read().decode(
+                "utf-8",
+                errors="replace",
+            )
+
+            return e.code, body
+
+        except (
+            urllib.error.URLError,
+            TimeoutError,
+            ConnectionError,
+        ) as e:
+
+            last_error = e
+
+            if attempt < 2:
+                wait = 2 ** attempt
+                print(
+                    f"Supabase connection attempt "
+                    f"{attempt + 1} failed: {e}"
+                )
+                print(f"Retrying in {wait} seconds...")
+                time.sleep(wait)
+
+    raise RuntimeError(
+        f"Could not connect to Supabase after 3 attempts: "
+        f"{last_error}"
+    )
+
+
 def supabase_rpc(function_name, payload):
-    url = f"{SUPABASE_URL}/rest/v1/rpc/{function_name}"
+    url = (
+        f"{SUPABASE_URL}/rest/v1/rpc/"
+        f"{function_name}"
+    )
 
-    with httpx2.Client(timeout=120) as client:
-        r = client.post(
-            url,
-            headers=SB_HEADERS,
-            json=payload,
-        )
+    status, body = supabase_post(
+        url,
+        payload,
+    )
 
-    if r.status_code >= 400:
+    if status >= 400:
         raise RuntimeError(
             f"Supabase RPC {function_name} failed: "
-            f"HTTP {r.status_code}: {r.text[:1000]}"
+            f"HTTP {status}: {body[:1000]}"
         )
 
-    if not r.text.strip():
+    if not body.strip():
         return []
 
-    return r.json()
+    try:
+        return json.loads(body)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(
+            f"Invalid JSON returned by Supabase RPC "
+            f"{function_name}: {body[:1000]}"
+        ) from e
 
 
 def supabase_insert(table, rows):
     if not rows:
         return
 
-    url = f"{SUPABASE_URL}/rest/v1/{table}"
+    url = (
+        f"{SUPABASE_URL}/rest/v1/"
+        f"{table}"
+    )
 
     # Keep requests comfortably sized.
     for start in range(0, len(rows), 500):
+
         chunk = rows[start:start + 500]
 
-        with httpx2.Client(timeout=120) as client:
-            r = client.post(
-                url,
-                headers=SB_HEADERS,
-                json=chunk,
-            )
+        status, body = supabase_post(
+            url,
+            chunk,
+        )
 
-        if r.status_code >= 400:
+        if status >= 400:
             raise RuntimeError(
                 f"Supabase insert into {table} failed: "
-                f"HTTP {r.status_code}: {r.text[:1000]}"
+                f"HTTP {status}: {body[:1000]}"
             )
 
 
 # ============================================================
-# HELPERS
+# GENERAL HELPERS
 # ============================================================
 
 def iso_now():
@@ -108,41 +184,65 @@ def key_string(key):
 
 
 def price_changed(old_price, new_price):
+
     if old_price is None:
         return True
 
     try:
-        return abs(float(old_price) - float(new_price)) > 0.001
+        return (
+            abs(
+                float(old_price)
+                - float(new_price)
+            )
+            > 0.001
+        )
+
     except Exception:
         return True
 
 
-def should_store(latest, current, now_dt):
+def should_store(
+    latest,
+    current,
+    now_dt,
+):
     """
     Store:
       - first observation
       - any price/MRP change
       - at least one observation every 24 hours
 
-    This keeps hourly scanning while avoiding millions of identical
-    database rows when a product price stays unchanged.
+    This keeps hourly scanning while avoiding
+    millions of identical database rows when
+    a product price stays unchanged.
     """
 
     if not latest:
         return True
 
-    if price_changed(latest.get("offer_price"), current.get("offer")):
+    if price_changed(
+        latest.get("offer_price"),
+        current.get("offer"),
+    ):
         return True
 
-    if price_changed(latest.get("mrp"), current.get("mrp")):
+    if price_changed(
+        latest.get("mrp"),
+        current.get("mrp"),
+    ):
         return True
 
     try:
         old_time = datetime.fromisoformat(
-            str(latest["scan_time"]).replace("Z", "+00:00")
+            str(
+                latest["scan_time"]
+            ).replace("Z", "+00:00")
         )
 
-        if now_dt - old_time >= timedelta(hours=24):
+        if (
+            now_dt - old_time
+            >= timedelta(hours=24)
+        ):
             return True
 
     except Exception:
@@ -156,12 +256,15 @@ def should_store(latest, current, now_dt):
 # ============================================================
 
 def get_latest_main(keys):
+
     if not keys:
         return {}
 
     rows = supabase_rpc(
         "get_latest_main_prices",
-        {"p_product_keys": keys},
+        {
+            "p_product_keys": keys,
+        },
     )
 
     return {
@@ -171,6 +274,7 @@ def get_latest_main(keys):
 
 
 def get_latest_comparison(keys):
+
     if not keys:
         return {}
 
@@ -188,20 +292,29 @@ def get_latest_comparison(keys):
     }
 
 
-def get_history_stats(main_rows, before_time):
+def get_history_stats(
+    main_rows,
+    before_time,
+):
+
     items = []
 
     for key, row in main_rows.items():
+
         if not row["in_stock"]:
             continue
 
         if row["mrp"] <= 0:
             continue
 
-        items.append({
-            "product_key": key_string(key),
-            "current_mrp": float(row["mrp"]),
-        })
+        items.append(
+            {
+                "product_key": key_string(key),
+                "current_mrp": float(
+                    row["mrp"]
+                ),
+            }
+        )
 
     if not items:
         return {}
@@ -221,12 +334,15 @@ def get_history_stats(main_rows, before_time):
 
 
 def get_latest_alerts(keys):
+
     if not keys:
         return {}
 
     rows = supabase_rpc(
         "get_latest_alerts",
-        {"p_product_keys": keys},
+        {
+            "p_product_keys": keys,
+        },
     )
 
     return {
@@ -239,17 +355,40 @@ def get_latest_alerts(keys):
 # SAVE CURRENT OBSERVATIONS
 # ============================================================
 
-def save_current_history(now, main_rows, comp_rows):
-    main_keys = [key_string(k) for k in main_rows]
-    comp_keys = [key_string(k) for k in comp_rows]
+def save_current_history(
+    now,
+    main_rows,
+    comp_rows,
+):
 
-    latest_main = get_latest_main(main_keys)
-    latest_comp = get_latest_comparison(comp_keys)
+    main_keys = [
+        key_string(k)
+        for k in main_rows
+    ]
 
-    now_dt = datetime.fromisoformat(now.replace("Z", "+00:00"))
+    comp_keys = [
+        key_string(k)
+        for k in comp_rows
+    ]
+
+    latest_main = get_latest_main(
+        main_keys
+    )
+
+    latest_comp = get_latest_comparison(
+        comp_keys
+    )
+
+    now_dt = datetime.fromisoformat(
+        now.replace("Z", "+00:00")
+    )
 
     main_to_save = []
     comp_to_save = []
+
+    # --------------------------------------------------------
+    # MAIN PIN
+    # --------------------------------------------------------
 
     for key, r in main_rows.items():
 
@@ -267,26 +406,39 @@ def save_current_history(now, main_rows, comp_rows):
         ):
             continue
 
-        main_to_save.append({
-            "scan_time": now,
-            "product_key": db_key,
-            "product_id": r["product_id"],
-            "sku_id": r["sku_id"],
-            "spin_id": r["spin_id"],
-            "variation_id": r["variation_id"],
-            "brand": r["brand"],
-            "product_name": r["name"],
-            "pack": r["pack"],
-            "mrp": r["mrp"],
-            "offer_price": r["offer"],
-            "unit_price": r["unit_price"],
-            "discount_pct": round(
-                (r["mrp"] - r["offer"]) / r["mrp"] * 100,
-                2,
-            ),
-            "in_stock": r["in_stock"],
-            "search_term": r["search_term"],
-        })
+        main_to_save.append(
+            {
+                "scan_time": now,
+                "product_key": db_key,
+                "product_id": r["product_id"],
+                "sku_id": r["sku_id"],
+                "spin_id": r["spin_id"],
+                "variation_id": r["variation_id"],
+                "brand": r["brand"],
+                "product_name": r["name"],
+                "pack": r["pack"],
+                "mrp": r["mrp"],
+                "offer_price": r["offer"],
+                "unit_price": r["unit_price"],
+                "discount_pct": round(
+                    (
+                        r["mrp"]
+                        - r["offer"]
+                    )
+                    / r["mrp"]
+                    * 100,
+                    2,
+                ),
+                "in_stock": r["in_stock"],
+                "search_term": r[
+                    "search_term"
+                ],
+            }
+        )
+
+    # --------------------------------------------------------
+    # COMPARISON PIN
+    # --------------------------------------------------------
 
     for key, r in comp_rows.items():
 
@@ -304,19 +456,29 @@ def save_current_history(now, main_rows, comp_rows):
         ):
             continue
 
-        comp_to_save.append({
-            "scan_time": now,
-            "comparison_pin": COMPARISON_PIN,
-            "product_key": db_key,
-            "brand": r["brand"],
-            "product_name": r["name"],
-            "pack": r["pack"],
-            "mrp": r["mrp"],
-            "offer_price": r["offer"],
-            "unit_price": r["unit_price"],
-            "in_stock": r["in_stock"],
-            "search_term": r["search_term"],
-        })
+        comp_to_save.append(
+            {
+                "scan_time": now,
+                "comparison_pin": COMPARISON_PIN,
+                "product_key": db_key,
+                "brand": r["brand"],
+                "product_name": r["name"],
+                "pack": r["pack"],
+                "mrp": r["mrp"],
+                "offer_price": r["offer"],
+                "unit_price": r[
+                    "unit_price"
+                ],
+                "in_stock": r["in_stock"],
+                "search_term": r[
+                    "search_term"
+                ],
+            }
+        )
+
+    # --------------------------------------------------------
+    # INSERT
+    # --------------------------------------------------------
 
     supabase_insert(
         "price_history",
@@ -329,7 +491,8 @@ def save_current_history(now, main_rows, comp_rows):
     )
 
     print(
-        f"Saved history: {len(main_to_save)} main + "
+        f"Saved history: "
+        f"{len(main_to_save)} main + "
         f"{len(comp_to_save)} comparison observations."
     )
 
@@ -338,7 +501,13 @@ def save_current_history(now, main_rows, comp_rows):
 # DEAL ENGINE
 # ============================================================
 
-def evaluate_deals(main_rows, comp_rows, stats, latest_alerts):
+def evaluate_deals(
+    main_rows,
+    comp_rows,
+    stats,
+    latest_alerts,
+):
+
     deals = []
 
     for key, row in main_rows.items():
@@ -364,17 +533,32 @@ def evaluate_deals(main_rows, comp_rows, stats, latest_alerts):
         if n < 3:
             continue
 
-        # MRP sanity guard.
+        # ----------------------------------------------------
+        # MRP SANITY CHECK
+        # ----------------------------------------------------
+
         if median > mrp * 1.05:
             continue
 
         if median <= 0:
             continue
 
-        hist_drop = (median - current) / median
+        # ----------------------------------------------------
+        # HISTORICAL RARITY
+        # ----------------------------------------------------
 
-        at_low = current <= low * 1.02
-        below_p20 = current <= p20
+        hist_drop = (
+            (median - current)
+            / median
+        )
+
+        at_low = (
+            current <= low * 1.02
+        )
+
+        below_p20 = (
+            current <= p20
+        )
 
         strong_hist = (
             hist_drop >= 0.25
@@ -386,10 +570,19 @@ def evaluate_deals(main_rows, comp_rows, stats, latest_alerts):
             and at_low
         )
 
-        if not (strong_hist or very_strong_hist):
+        if not (
+            strong_hist
+            or very_strong_hist
+        ):
             continue
 
-        comparison = comp_rows.get(key)
+        # ----------------------------------------------------
+        # CROSS-PIN SUPPORT
+        # ----------------------------------------------------
+
+        comparison = comp_rows.get(
+            key
+        )
 
         if not comparison:
             continue
@@ -397,30 +590,53 @@ def evaluate_deals(main_rows, comp_rows, stats, latest_alerts):
         if not comparison["in_stock"]:
             continue
 
-        comparison_price = float(comparison["offer"])
+        comparison_price = float(
+            comparison["offer"]
+        )
 
         cross_support = (
-            comparison_price >= current * 1.10
+            comparison_price
+            >= current * 1.10
         )
 
         if not cross_support:
             continue
 
+        # ----------------------------------------------------
+        # SCORE
+        # ----------------------------------------------------
+
         score = (
             50
-            + min(30, hist_drop * 100)
-            + (10 if at_low else 0)
+            + min(
+                30,
+                hist_drop * 100,
+            )
             + (
                 10
-                if comparison_price >= current * 1.20
+                if at_low
+                else 0
+            )
+            + (
+                10
+                if comparison_price
+                >= current * 1.20
                 else 0
             )
         )
 
-        previous = latest_alerts.get(db_key)
+        # ----------------------------------------------------
+        # DUPLICATE ALERT CHECK
+        # ----------------------------------------------------
+
+        previous = latest_alerts.get(
+            db_key
+        )
 
         if previous:
+
             try:
+
                 previous_price = float(
                     previous["current_price"]
                 )
@@ -433,60 +649,119 @@ def evaluate_deals(main_rows, comp_rows, stats, latest_alerts):
             except Exception:
                 pass
 
+        # ----------------------------------------------------
+        # REASON
+        # ----------------------------------------------------
+
         reasons = [
-            f"current ₹{current:.0f} vs historical median ₹{median:.0f}",
-            f"historical low ₹{low:.0f}",
-            f"500084 ₹{comparison_price:.0f}",
+            (
+                f"current ₹{current:.0f} "
+                f"vs historical median "
+                f"₹{median:.0f}"
+            ),
+            (
+                f"historical low "
+                f"₹{low:.0f}"
+            ),
+            (
+                f"500084 "
+                f"₹{comparison_price:.0f}"
+            ),
         ]
 
         if at_low:
-            reasons.append("near historical low")
+            reasons.append(
+                "near historical low"
+            )
 
         if below_p20:
             reasons.append(
-                "at/below historical 20th percentile"
+                "at/below historical "
+                "20th percentile"
             )
 
-        deals.append({
-            "alert_time": iso_now(),
-            "product_key": db_key,
-            "product_name": row["name"],
-            "pack": row["pack"],
-            "current_price_533006": current,
-            "historical_median": round(median, 2),
-            "historical_low": round(low, 2),
-            "historical_p20": round(p20, 2),
-            "comparison_pin": COMPARISON_PIN,
-            "comparison_price": comparison_price,
-            "historical_observations": n,
-            "score": round(score, 1),
-            "reason": "; ".join(reasons),
-        })
+        deals.append(
+            {
+                "alert_time": iso_now(),
+                "product_key": db_key,
+                "product_name": row["name"],
+                "pack": row["pack"],
+                "current_price_533006": current,
+                "historical_median": round(
+                    median,
+                    2,
+                ),
+                "historical_low": round(
+                    low,
+                    2,
+                ),
+                "historical_p20": round(
+                    p20,
+                    2,
+                ),
+                "comparison_pin": COMPARISON_PIN,
+                "comparison_price": comparison_price,
+                "historical_observations": n,
+                "score": round(
+                    score,
+                    1,
+                ),
+                "reason": "; ".join(
+                    reasons
+                ),
+            }
+        )
 
     return deals
 
 
+# ============================================================
+# SAVE ALERTS
+# ============================================================
+
 def save_deals(deals):
+
     if not deals:
         return
 
     rows = []
 
     for d in deals:
-        rows.append({
-            "alert_time": d["alert_time"],
-            "product_key": d["product_key"],
-            "product_name": d["product_name"],
-            "pack": d["pack"],
-            "current_price": d["current_price_533006"],
-            "historical_median": d["historical_median"],
-            "historical_low": d["historical_low"],
-            "historical_p20": d["historical_p20"],
-            "comparison_price": d["comparison_price"],
-            "comparison_pin": d["comparison_pin"],
-            "score": d["score"],
-            "reason": d["reason"],
-        })
+
+        rows.append(
+            {
+                "alert_time": d[
+                    "alert_time"
+                ],
+                "product_key": d[
+                    "product_key"
+                ],
+                "product_name": d[
+                    "product_name"
+                ],
+                "pack": d["pack"],
+                "current_price": d[
+                    "current_price_533006"
+                ],
+                "historical_median": d[
+                    "historical_median"
+                ],
+                "historical_low": d[
+                    "historical_low"
+                ],
+                "historical_p20": d[
+                    "historical_p20"
+                ],
+                "comparison_price": d[
+                    "comparison_price"
+                ],
+                "comparison_pin": d[
+                    "comparison_pin"
+                ],
+                "score": d["score"],
+                "reason": d["reason"],
+            }
+        )
 
     supabase_insert(
         "deal_alerts",
@@ -498,19 +773,31 @@ def save_deals(deals):
 # SWIGGY SCAN
 # ============================================================
 
-def scan_pin(c, sid, address_id, pin_label, request_start):
+def scan_pin(
+    c,
+    sid,
+    address_id,
+    pin_label,
+    request_start,
+):
+
     results = {}
     pages = 0
     failed = 0
 
-    for i, query in enumerate(sw.SEARCHES, 1):
+    for i, query in enumerate(
+        sw.SEARCHES,
+        1,
+    ):
 
         print(
-            f"[{pin_label} {i:03}/{len(sw.SEARCHES)}] "
+            f"[{pin_label} "
+            f"{i:03}/{len(sw.SEARCHES)}] "
             f"{query}"
         )
 
         try:
+
             _, response = sw.call(
                 c,
                 sid,
@@ -527,20 +814,29 @@ def scan_pin(c, sid, address_id, pin_label, request_start):
 
             results.update(
                 sw.extract_rows(
-                    sw.products(response),
+                    sw.products(
+                        response
+                    ),
                     query,
                 )
             )
 
         except Exception as e:
+
             failed += 1
+
             print(
-                f"  FAILED: {str(e)[:300]}"
+                f"  FAILED: "
+                f"{str(e)[:300]}"
             )
 
         time.sleep(0.15)
 
-    return results, pages, failed
+    return (
+        results,
+        pages,
+        failed,
+    )
 
 
 # ============================================================
@@ -550,8 +846,13 @@ def scan_pin(c, sid, address_id, pin_label, request_start):
 def main():
 
     print("=" * 70)
-    print(" INSTAMART CLOUD RARE-DEAL SCANNER")
-    print(" 533006 vs 500084")
+    print(
+        " INSTAMART CLOUD "
+        "RARE-DEAL SCANNER"
+    )
+    print(
+        " 533006 vs 500084"
+    )
     print("=" * 70)
 
     now = iso_now()
@@ -560,10 +861,14 @@ def main():
 
     try:
 
+        # ----------------------------------------------------
+        # CONNECT TO SWIGGY MCP
+        # ----------------------------------------------------
+
         c, sid = sw.init_session()
 
         # ----------------------------------------------------
-        # Find saved addresses
+        # FIND SAVED ADDRESSES
         # ----------------------------------------------------
 
         _, address_response = sw.call(
@@ -583,52 +888,80 @@ def main():
 
         main_addr = next(
             (
-                a for a in all_addresses
-                if str(a.get("addressTag", "")).lower() == "home"
-                and MAIN_PIN in str(a)
+                a
+                for a in all_addresses
+                if (
+                    str(
+                        a.get(
+                            "addressTag",
+                            "",
+                        )
+                    ).lower()
+                    == "home"
+                    and MAIN_PIN
+                    in str(a)
+                )
             ),
             None,
         )
 
         if not main_addr:
+
             main_addr = next(
                 (
-                    a for a in all_addresses
-                    if MAIN_PIN in str(a)
+                    a
+                    for a in all_addresses
+                    if MAIN_PIN
+                    in str(a)
                 ),
                 None,
             )
 
         comparison_addr = next(
             (
-                a for a in all_addresses
-                if COMPARISON_PIN in str(a)
+                a
+                for a in all_addresses
+                if COMPARISON_PIN
+                in str(a)
             ),
             None,
         )
 
         if not main_addr:
             raise RuntimeError(
-                f"{MAIN_PIN} address not found."
+                f"{MAIN_PIN} "
+                "address not found."
             )
 
         if not comparison_addr:
             raise RuntimeError(
-                f"{COMPARISON_PIN} comparison address not found."
+                f"{COMPARISON_PIN} "
+                "comparison address not found."
             )
 
-        print(f"{MAIN_PIN} main address found.")
         print(
-            f"{COMPARISON_PIN} comparison address found."
+            f"{MAIN_PIN} "
+            "main address found."
+        )
+
+        print(
+            f"{COMPARISON_PIN} "
+            "comparison address found."
         )
 
         # ----------------------------------------------------
-        # Main PIN scan
+        # MAIN PIN SCAN
         # ----------------------------------------------------
 
-        print("\n--- 533006 MAIN SCAN ---")
+        print(
+            "\n--- 533006 MAIN SCAN ---"
+        )
 
-        main_rows, main_pages, main_failed = scan_pin(
+        (
+            main_rows,
+            main_pages,
+            main_failed,
+        ) = scan_pin(
             c,
             sid,
             main_addr["id"],
@@ -637,12 +970,19 @@ def main():
         )
 
         # ----------------------------------------------------
-        # Comparison PIN scan
+        # COMPARISON PIN SCAN
         # ----------------------------------------------------
 
-        print("\n--- 500084 COMPARISON SCAN ---")
+        print(
+            "\n--- 500084 "
+            "COMPARISON SCAN ---"
+        )
 
-        comp_rows, comp_pages, comp_failed = scan_pin(
+        (
+            comp_rows,
+            comp_pages,
+            comp_failed,
+        ) = scan_pin(
             c,
             sid,
             comparison_addr["id"],
@@ -651,11 +991,16 @@ def main():
         )
 
         # ----------------------------------------------------
-        # Historical statistics MUST be calculated before
-        # today's observation is inserted.
+        # HISTORICAL STATISTICS
+        #
+        # MUST happen BEFORE today's observation
+        # is inserted.
         # ----------------------------------------------------
 
-        print("\nCalculating historical statistics...")
+        print(
+            "\nCalculating "
+            "historical statistics..."
+        )
 
         stats = get_history_stats(
             main_rows,
@@ -663,12 +1008,13 @@ def main():
         )
 
         print(
-            f"Historical statistics available for "
+            "Historical statistics "
+            "available for "
             f"{len(stats)} variants."
         )
 
         # ----------------------------------------------------
-        # Save current observation
+        # SAVE CURRENT OBSERVATION
         # ----------------------------------------------------
 
         save_current_history(
@@ -678,7 +1024,7 @@ def main():
         )
 
         # ----------------------------------------------------
-        # Previous alerts
+        # PREVIOUS ALERTS
         # ----------------------------------------------------
 
         main_keys = [
@@ -686,12 +1032,14 @@ def main():
             for k in main_rows
         ]
 
-        latest_alerts = get_latest_alerts(
-            main_keys
+        latest_alerts = (
+            get_latest_alerts(
+                main_keys
+            )
         )
 
         # ----------------------------------------------------
-        # Evaluate
+        # EVALUATE DEALS
         # ----------------------------------------------------
 
         deals = evaluate_deals(
@@ -702,16 +1050,21 @@ def main():
         )
 
         # ----------------------------------------------------
-        # Save alerts
+        # SAVE ALERTS
         # ----------------------------------------------------
 
         save_deals(deals)
+
+        # ----------------------------------------------------
+        # WRITE JSON RESULT
+        # ----------------------------------------------------
 
         with open(
             DEALS_FILE,
             "w",
             encoding="utf-8",
         ) as f:
+
             json.dump(
                 deals,
                 f,
@@ -720,46 +1073,73 @@ def main():
             )
 
         # ----------------------------------------------------
-        # Summary
+        # SUMMARY
         # ----------------------------------------------------
 
         total_pages = (
-            main_pages + comp_pages
+            main_pages
+            + comp_pages
         )
 
         total_failed = (
-            main_failed + comp_failed
+            main_failed
+            + comp_failed
         )
 
-        print("\n" + "=" * 70)
-        print("CLOUD SCAN COMPLETE")
-        print("=" * 70)
-
-        print(f"Timestamp: {now}")
         print(
-            f"{MAIN_PIN} unique variants: "
+            "\n"
+            + "=" * 70
+        )
+
+        print(
+            "CLOUD SCAN COMPLETE"
+        )
+
+        print(
+            "=" * 70
+        )
+
+        print(
+            f"Timestamp: {now}"
+        )
+
+        print(
+            f"{MAIN_PIN} "
+            f"unique variants: "
             f"{len(main_rows)}"
         )
+
         print(
-            f"{COMPARISON_PIN} unique variants: "
+            f"{COMPARISON_PIN} "
+            f"unique variants: "
             f"{len(comp_rows)}"
         )
+
         print(
-            f"API pages: {total_pages}"
+            f"API pages: "
+            f"{total_pages}"
         )
+
         print(
-            f"Failed searches: {total_failed}"
+            f"Failed searches: "
+            f"{total_failed}"
         )
+
         print(
-            f"Historical stats: {len(stats)}"
+            f"Historical stats: "
+            f"{len(stats)}"
         )
+
         print(
-            f"NEW RARE DEALS: {len(deals)}"
+            f"NEW RARE DEALS: "
+            f"{len(deals)}"
         )
 
         if deals:
 
-            print("\n*** NEW RARE DEALS ***")
+            print(
+                "\n*** NEW RARE DEALS ***"
+            )
 
             for d in deals[:20]:
 
@@ -767,15 +1147,21 @@ def main():
                     f'RARE DEAL — '
                     f'{d["product_name"]} | '
                     f'{d["pack"]} | '
-                    f'533006 ₹{d["current_price_533006"]:.0f} | '
-                    f'typical ₹{d["historical_median"]:.0f} | '
-                    f'500084 ₹{d["comparison_price"]:.0f} | '
-                    f'score {d["score"]:.1f}'
+                    f'533006 '
+                    f'₹{d["current_price_533006"]:.0f} | '
+                    f'typical '
+                    f'₹{d["historical_median"]:.0f} | '
+                    f'500084 '
+                    f'₹{d["comparison_price"]:.0f} | '
+                    f'score '
+                    f'{d["score"]:.1f}'
                 )
 
         else:
+
             print(
-                "No new rare deal alerts this run."
+                "No new rare deal "
+                "alerts this run."
             )
 
     finally:
