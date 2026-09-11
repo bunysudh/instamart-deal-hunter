@@ -1,3 +1,31 @@
+name: Instamart Deal Scanner
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 * * * *"
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install httpx2
+
       - name: Test Supabase DNS
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -22,7 +50,9 @@
                   headers={"Accept": "application/dns-json"}
               )
 
-              data = json.load(urllib.request.urlopen(req, timeout=20))
+              data = json.load(
+                  urllib.request.urlopen(req, timeout=20)
+              )
 
               answers = [
                   a["data"]
@@ -31,4 +61,20 @@
               ]
 
               print(f"{record_type} records:", answers)
-          PY
+
+      - name: Run Instamart scanner
+        env:
+          SWIGGY_TOKEN: ${{ secrets.SWIGGY_TOKEN }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          python cloud_scanner.py
+
+      - name: Show deal results
+        if: always()
+        run: |
+          if [ -f rare_deals.json ]; then
+            cat rare_deals.json
+          else
+            echo "No rare_deals.json was produced."
+          fi
