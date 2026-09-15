@@ -6,14 +6,18 @@ on:
   schedule:
     - cron: "0 * * * *"
 
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
 jobs:
   scan:
     runs-on: ubuntu-latest
 
-    permissions:
-  contents: write
-  pages: write
-  id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
       - name: Checkout repository
@@ -49,3 +53,222 @@ jobs:
           else
             echo "No rare_deals.json produced."
           fi
+
+      - name: Show Top 50 file
+        if: always()
+        run: |
+          echo "========================================"
+          echo "TOP 50 CHEAPEST — ALL RESULTS"
+          echo "========================================"
+
+          if [ -f top50_cheapest_533006.json ]; then
+            cat top50_cheapest_533006.json
+          else
+            echo "No top50_cheapest_533006.json produced."
+          fi
+
+      - name: Build mobile Top 50 page
+        run: |
+          mkdir -p site
+
+          python - <<'PY'
+          import json
+          import html
+          from pathlib import Path
+
+          source = Path("top50_cheapest_533006.json")
+          output = Path("site/index.html")
+
+          if source.exists():
+              items = json.loads(source.read_text(encoding="utf-8"))
+          else:
+              items = []
+
+          rows = []
+
+          for item in items[:50]:
+              name = html.escape(str(item.get("product_name", "")))
+              pack = html.escape(str(item.get("pack", "")))
+              price = float(item.get("current_price_533006", 0))
+              mrp = float(item.get("mrp", 0))
+              discount = float(item.get("discount_pct", 0))
+
+              rows.append(
+                  f"""
+                  <tr>
+                    <td>{int(item.get("rank", len(rows) + 1))}</td>
+                    <td>
+                      <strong>{name}</strong>
+                      <div class="pack">{pack}</div>
+                    </td>
+                    <td class="price">₹{price:.0f}</td>
+                    <td>₹{mrp:.0f}</td>
+                    <td>{discount:.1f}%</td>
+                  </tr>
+                  """
+              )
+
+          generated = "\n".join(rows)
+
+          page = f"""<!doctype html>
+          <html lang="en">
+          <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <meta http-equiv="refresh" content="300">
+            <title>Instamart Top 50 — 533006</title>
+
+            <style>
+              * {{
+                box-sizing: border-box;
+              }}
+
+              body {{
+                margin: 0;
+                font-family: Arial, sans-serif;
+                background: #f5f5f5;
+                color: #222;
+              }}
+
+              header {{
+                background: white;
+                padding: 18px 14px;
+                position: sticky;
+                top: 0;
+                z-index: 10;
+                box-shadow: 0 2px 8px rgba(0,0,0,.08);
+              }}
+
+              h1 {{
+                margin: 0 0 5px;
+                font-size: 22px;
+              }}
+
+              .subtitle {{
+                color: #666;
+                font-size: 13px;
+              }}
+
+              .container {{
+                padding: 12px;
+                max-width: 1000px;
+                margin: auto;
+              }}
+
+              .card {{
+                background: white;
+                border-radius: 10px;
+                overflow: hidden;
+                box-shadow: 0 1px 5px rgba(0,0,0,.08);
+              }}
+
+              table {{
+                width: 100%;
+                border-collapse: collapse;
+              }}
+
+              th {{
+                background: #f0f0f0;
+                padding: 10px 7px;
+                text-align: left;
+                font-size: 12px;
+                position: sticky;
+                top: 72px;
+              }}
+
+              td {{
+                padding: 10px 7px;
+                border-top: 1px solid #eee;
+                font-size: 13px;
+                vertical-align: top;
+              }}
+
+              td:first-child {{
+                width: 35px;
+                font-weight: bold;
+                color: #666;
+              }}
+
+              .pack {{
+                color: #777;
+                font-size: 12px;
+                margin-top: 3px;
+              }}
+
+              .price {{
+                font-weight: bold;
+                white-space: nowrap;
+              }}
+
+              .updated {{
+                margin-top: 12px;
+                color: #777;
+                font-size: 12px;
+                text-align: center;
+              }}
+
+              @media (max-width: 600px) {{
+                th:nth-child(4),
+                td:nth-child(4) {{
+                  display: none;
+                }}
+
+                th, td {{
+                  padding: 9px 5px;
+                }}
+
+                h1 {{
+                  font-size: 19px;
+                }}
+              }}
+            </style>
+          </head>
+
+          <body>
+            <header>
+              <h1>🏆 Instamart Top 50</h1>
+              <div class="subtitle">
+                Cheapest discounted products • PIN 533006
+              </div>
+            </header>
+
+            <div class="container">
+              <div class="card">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>#</th>
+                      <th>Product</th>
+                      <th>Price</th>
+                      <th>MRP</th>
+                      <th>Off</th>
+                    </tr>
+                  </thead>
+
+                  <tbody>
+                    {generated}
+                  </tbody>
+                </table>
+              </div>
+
+              <div class="updated">
+                Automatically updated after each hourly scan.
+              </div>
+            </div>
+          </body>
+          </html>
+          """
+
+          output.write_text(page, encoding="utf-8")
+          print(f"Created {output}")
+          print(f"Products displayed: {len(items[:50])}")
+          PY
+
+      - name: Upload GitHub Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
