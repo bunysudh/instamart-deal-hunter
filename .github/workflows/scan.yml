@@ -54,6 +54,56 @@ jobs:
             echo "No rare_deals.json produced."
           fi
 
+      - name: Send ntfy rare deal alerts
+        if: success()
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: |
+          if [ -s rare_deals.json ] && [ "$(cat rare_deals.json)" != "[]" ]; then
+            python - <<'PY'
+          import json
+          import os
+          import urllib.request
+
+          topic = os.environ["NTFY_TOPIC"]
+
+          if not topic:
+              raise SystemExit("NTFY_TOPIC secret is missing.")
+
+          with open("rare_deals.json", "r", encoding="utf-8") as f:
+              deals = json.load(f)
+
+          lines = []
+
+          for deal in deals[:10]:
+              lines.append(
+                  f'RARE DEAL — {deal["product_name"]} {deal["pack"]} | '
+                  f'533006 ₹{deal["current_price_533006"]:.0f} | '
+                  f'typical ₹{deal["historical_median"]:.0f} | '
+                  f'500084 ₹{deal["comparison_price"]:.0f}'
+              )
+
+          message = "\n".join(lines)
+
+          request = urllib.request.Request(
+              f"https://ntfy.sh/{topic}",
+              data=message.encode("utf-8"),
+              method="POST",
+              headers={
+                  "Title": "Instamart Rare Deal",
+                  "Priority": "high",
+                  "Tags": "moneybag",
+              },
+          )
+
+          with urllib.request.urlopen(request, timeout=20) as response:
+              print("ntfy notification sent.")
+              print("HTTP status:", response.status)
+          PY
+          else
+            echo "No new rare deals; no notification sent."
+          fi
+
       - name: Show Top 50 file
         if: always()
         run: |
