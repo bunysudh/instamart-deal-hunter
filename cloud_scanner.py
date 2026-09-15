@@ -23,6 +23,7 @@ COMPARISON_PIN = "500084"
 
 DEALS_FILE = "rare_deals.json"
 ALERT_LOG = "rare_deal_alerts.log"
+TOP50_FILE = "top50_cheapest_533006.json"
 
 
 # ============================================================
@@ -165,7 +166,7 @@ def initialize(client, token):
             "capabilities": {},
             "clientInfo": {
                 "name": "instamart-cloud-deal-scanner",
-                "version": "2.0.0",
+                "version": "2.1.0",
             },
         },
     }
@@ -606,8 +607,59 @@ def previous_alerted(
 
 
 # ============================================================
+# TOP 50 CHEAPEST
+# ============================================================
+
+def top_50_cheapest(main_rows):
+    """
+    Return the 50 cheapest currently in-stock SKUs found in MAIN_PIN.
+    This is intentionally independent of the rare-deal engine.
+    """
+    in_stock = [
+        row for row in main_rows.values()
+        if row["in_stock"]
+        and isinstance(row.get("offer"), (int, float))
+        and row["offer"] >= 0
+    ]
+
+    in_stock.sort(
+        key=lambda row: (
+            row["offer"],
+            row["mrp"],
+            normalize(row["brand"]),
+            normalize(row["name"]),
+            normalize(row["pack"]),
+        )
+    )
+
+    results = []
+
+    for rank, row in enumerate(in_stock[:50], 1):
+        discount_pct = (
+            (row["mrp"] - row["offer"]) / row["mrp"] * 100
+            if row["mrp"] > 0
+            else 0
+        )
+
+        results.append({
+            "rank": rank,
+            "product_name": row["name"],
+            "pack": row["pack"],
+            "current_price_533006": round(row["offer"], 2),
+            "mrp": round(row["mrp"], 2),
+            "discount_pct": round(discount_pct, 2),
+            "unit_price": row["unit_price"],
+            "brand": row["brand"],
+            "in_stock": row["in_stock"],
+        })
+
+    return results
+
+
+# ============================================================
 # DEAL ENGINE
 # ============================================================
+
 
 def evaluate_deals(
     conn,
@@ -637,6 +689,29 @@ def evaluate_deals(
         median = stats["median"]
         low = stats["low"]
         p20 = stats["p20"]
+
+        # --------------------------------------------------------
+        # LOW-PRICE NORMAL-DEAL FILTER
+        #
+        # Rare deals remain primarily historical-price driven.
+        # This extra MRP gate only suppresses common low-priced
+        # products unless their MRP discount is substantial.
+        #
+        # ₹10-₹20 -> at least 50% off MRP
+        # ₹21-₹50 -> at least 40% off MRP
+        # Above ₹50 -> no extra MRP gate
+        # --------------------------------------------------------
+        mrp_discount_pct = (
+            (row["mrp"] - current) / row["mrp"] * 100
+            if row["mrp"] > 0
+            else 0
+        )
+
+        if current <= 20 and mrp_discount_pct < 50:
+            continue
+
+        if 20 < current <= 50 and mrp_discount_pct < 40:
+            continue
 
         # Historical typical price must make sense
         # relative to today's MRP.
@@ -1146,6 +1221,10 @@ def run_scan():
     finally:
         conn.close()
 
+    # Top 50 is a separate current-price view and is not affected
+    # by rare-deal filtering.
+    cheapest = top_50_cheapest(main_rows)
+
     # --------------------------------------------------------
     # OUTPUT
     # --------------------------------------------------------
@@ -1157,6 +1236,18 @@ def run_scan():
     ) as file:
         json.dump(
             deals,
+            file,
+            indent=2,
+            ensure_ascii=False,
+        )
+
+    with open(
+        TOP50_FILE,
+        "w",
+        encoding="utf-8",
+    ) as file:
+        json.dump(
+            cheapest,
             file,
             indent=2,
             ensure_ascii=False,
@@ -1220,6 +1311,11 @@ def run_scan():
     )
 
     print(
+        "Top 50 cheapest products:",
+        len(cheapest),
+    )
+
+    print(
         "New RARE DEALS:",
         len(deals),
     )
@@ -1248,6 +1344,18 @@ def run_scan():
         print("")
         print(
             "No new rare deal alerts this scan."
+        )
+
+    print("")
+    print("TOP 50 CHEAPEST — FIRST 10")
+    for item in cheapest[:10]:
+        print(
+            f'#{item["rank"]} '
+            f'{item["product_name"]} | '
+            f'{item["pack"]} | '
+            f'533006 ₹{item["current_price_533006"]:.0f} | '
+            f'MRP ₹{item["mrp"]:.0f} | '
+            f'{item["discount_pct"]:.1f}% off'
         )
 
     print("=" * 70)
