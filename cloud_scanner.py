@@ -612,7 +612,7 @@ def previous_alerted(
 
 def top_50_cheapest(main_rows):
     """
-    Return the 50 cheapest currently in-stock SKUs found in MAIN_PIN.
+    Return the 50 cheapest currently in-stock discounted SKUs found in MAIN_PIN.
     This is intentionally independent of the rare-deal engine.
     """
     in_stock = [
@@ -620,6 +620,7 @@ def top_50_cheapest(main_rows):
         if row["in_stock"]
         and isinstance(row.get("offer"), (int, float))
         and row["offer"] >= 0
+        and row["offer"] < row["mrp"]
     ]
 
     in_stock.sort(
